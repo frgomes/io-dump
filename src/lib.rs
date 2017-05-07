@@ -15,7 +15,7 @@ use tokio_io::{AsyncRead, AsyncWrite};
 //TODO use tokio_io::split::{ReadHalf, WriteHalf};
 
 
-trait IoDump<T> {
+pub trait IoDump<T> {
     fn write_block(&mut self, Direction, &[u8]) -> std::io::Result<()>;
 }
 
