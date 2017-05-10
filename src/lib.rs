@@ -34,6 +34,11 @@ pub struct Trace {
     dump: File,
     now:  Instant,
 }
+
+pub mod dump {
+    pub use IoDump;
+}
+
 //--------------------------------------------------------------------------------------------------
 
 impl IoDump {
