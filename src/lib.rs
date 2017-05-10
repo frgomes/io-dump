@@ -15,7 +15,7 @@ use tokio_io::{AsyncRead, AsyncWrite};
 //TODO use tokio_io::split::{ReadHalf, WriteHalf};
 
 
-pub trait IoDump<T> {
+pub trait IoDump {
     fn write_block(&mut self, Direction, &[u8]) -> std::io::Result<()>;
 }
 
@@ -36,8 +36,8 @@ pub struct Trace {
 }
 //--------------------------------------------------------------------------------------------------
 
-impl<T> IoDump<T> {
-    pub fn passthru(upstream: T) -> std::io::Result<Holder<T>> {
+impl IoDump {
+    pub fn passthru<T>(upstream: T) -> std::io::Result<Holder<T>> {
         Ok(
             Holder {
                 upstream: upstream,
@@ -45,7 +45,7 @@ impl<T> IoDump<T> {
             })
     }
 
-    pub fn wrapper<P: AsRef<Path>>(upstream: T, path: P) -> std::io::Result<Holder<T>> {
+    pub fn wrapper<T, P: AsRef<Path>>(upstream: T, path: P) -> std::io::Result<Holder<T>> {
         Ok(
             Holder {
                 upstream: upstream,
@@ -121,7 +121,7 @@ impl Trace {
 
 //--------------------------------------------------------------------------------------------------
 
-impl<T> IoDump<T> for Holder<T> {
+impl<T> IoDump for Holder<T> {
     fn write_block(&mut self, dir: Direction, data: &[u8]) -> std::io::Result<()> {
         match self.control {
             Enum::Logger( ref mut trace ) => try!(trace.write_block(dir, &data)),
