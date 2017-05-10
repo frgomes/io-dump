@@ -19,72 +19,61 @@ pub trait IoDump<T> {
     fn write_block(&mut self, Direction, &[u8]) -> std::io::Result<()>;
 }
 
-/// Holds the actual IoDump implementation.
+/// Holds data needed by IoDump implementation.
 pub struct Holder<T> {
-    holder: T,
+    upstream: T,
+    control: Enum,
 }
 
-/// Forwards reads and writes upstream.
-pub struct Passthru<T> {
-    upstream: T,
+pub enum Enum {
+    Passthru,
+    Logger ( Trace ),
 }
 
-/// Copies all data read from and written to the upstream I/O to a file.
-pub struct Logger<T> {
-    upstream: T,
+pub struct Trace {
     dump: File,
-    now: Instant,
+    now:  Instant,
 }
-
 //--------------------------------------------------------------------------------------------------
 
 impl<T> IoDump<T> {
-    pub fn passthru(upstream: T) -> std::io::Result<Holder<Passthru<T>>> {
+    pub fn passthru(upstream: T) -> std::io::Result<Holder<T>> {
         Ok(
             Holder {
-                holder: Passthru {
-                    upstream: upstream,
-                }
+                upstream: upstream,
+                control: Enum::Passthru,
             })
     }
 
-    pub fn wrapper<P: AsRef<Path>>(upstream: T, path: P) -> std::io::Result<Holder<Logger<T>>> {
+    pub fn wrapper<P: AsRef<Path>>(upstream: T, path: P) -> std::io::Result<Holder<T>> {
         Ok(
             Holder {
-                holder: Logger {
-                    upstream: upstream,
-                    dump: try!(File::create(path)),
-                    now: Instant::now(),
-                }
+                upstream: upstream,
+                control: Enum::Logger(
+                    Trace {
+                        dump: try!(File::create(path)),
+                        now: Instant::now(),
+                    }),
             })
     }
 }
 
 //--------------------------------------------------------------------------------------------------
 
-impl<T> IoDump<T> for Passthru<T> {
+impl Trace {
     fn write_block(&mut self, dir: Direction, data: &[u8]) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<T> IoDump<T> for Logger<T> {
-    fn write_block(&mut self, dir: Direction, data: &[u8]) -> std::io::Result<()> {
-        let mut dump = &self.dump;
-        let now = self.now;
-
         if dir == Direction::In {
-            try!(write!(dump, "<-  "));
+            try!(write!(self.dump, "<-  "));
         } else {
-            try!(write!(dump, "->  "));
+            try!(write!(self.dump, "->  "));
         }
 
         // Write elapsed time
-        let elapsed = millis((Instant::now() - now)) as f64 / 1000.0;
-        try!(write!(dump, "{:.*}s  {} bytes", 3, elapsed, data.len()));
+        let elapsed = millis((Instant::now() - self.now)) as f64 / 1000.0;
+        try!(write!(self.dump, "{:.*}s  {} bytes", 3, elapsed, data.len()));
 
         // Write newline
-        try!(write!(dump, "\n"));
+        try!(write!(self.dump, "\n"));
 
         let mut pos = 0;
 
@@ -97,34 +86,34 @@ impl<T> IoDump<T> for Logger<T> {
             // First write binary
             for i in 0..LINE {
                 if i >= line.len() {
-                    try!(write!(dump, "   "));
+                    try!(write!(self.dump, "   "));
                 } else {
-                    try!(write!(dump, "{:02X} ", line[i]));
+                    try!(write!(self.dump, "{:02X} ", line[i]));
                 }
             }
 
             // Write some spacing for the ascii
-            try!(write!(dump, "    "));
+            try!(write!(self.dump, "    "));
 
             for &byte in line.iter() {
                 match byte {
-                    0 => try!(write!(dump, "\\0")),
-                    9 => try!(write!(dump, "\\t")),
-                    10 => try!(write!(dump, "\\n")),
-                    13 => try!(write!(dump, "\\r")),
+                     0 => try!(write!(self.dump, "\\0")),
+                     9 => try!(write!(self.dump, "\\t")),
+                    10 => try!(write!(self.dump, "\\n")),
+                    13 => try!(write!(self.dump, "\\r")),
                     32...126 => {
-                        try!(dump.write(&[b' ', byte]));
+                        try!(self.dump.write(&[b' ', byte]));
                     }
-                    _ => try!(write!(dump, "\\?")),
+                    _ => try!(write!(self.dump, "\\?")),
                 }
             }
 
-            write!(dump, "\n");
+            try!(write!(self.dump, "\n"));
 
             pos = end;
         }
 
-        try!(write!(dump, "\n"));
+        try!(write!(self.dump, "\n"));
 
         Ok(())
     }
@@ -132,48 +121,55 @@ impl<T> IoDump<T> for Logger<T> {
 
 //--------------------------------------------------------------------------------------------------
 
-impl<T> IoDump<T> for Holder<Passthru<T>> {
+impl<T> IoDump<T> for Holder<T> {
     fn write_block(&mut self, dir: Direction, data: &[u8]) -> std::io::Result<()> {
-        self.holder.write_block(dir, data)
-    }
-}
-
-impl<T> IoDump<T> for Holder<Logger<T>> {
-    fn write_block(&mut self, dir: Direction, data: &[u8]) -> std::io::Result<()> {
-        self.holder.write_block(dir, data)
+        match self.control {
+            Enum::Logger( ref mut trace ) => try!(trace.write_block(dir, &data)),
+            Enum::Passthru                => (),
+        }
+        Ok(())
     }
 }
 
 //--------------------------------------------------------------------------------------------------
 
-impl<T: Read> Read for Holder<Passthru<T>> {
+impl<T: Read> Read for Holder<T> {
     fn read(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
-        let n = try!(self.holder.upstream.read(dst));
+        let n = try!(self.upstream.read(dst));
+        match self.control {
+            Enum::Logger( ref mut trace ) => try!(trace.write_block(Direction::Out, &dst[0..n])),
+            Enum::Passthru                => (),
+        }
         Ok(n)
     }
 }
 
-impl<T: Write> Write for Holder<Passthru<T>> {
+impl<T: Write> Write for Holder<T> {
     fn write(&mut self, src: &[u8]) -> std::io::Result<usize> {
-        let n = try!(self.holder.upstream.write(src));
+        let n = try!(self.upstream.write(src));
+        match self.control {
+            Enum::Logger( ref mut trace ) => try!(trace.write_block(Direction::In, &src[0..n])),
+            Enum::Passthru                => (),
+        }
         Ok(n)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        try!(self.holder.upstream.flush());
+        try!(self.upstream.flush());
         Ok(())
     }
 }
 
-impl<T: AsyncRead> AsyncRead for Holder<Passthru<T>> {
+impl<T: AsyncRead> AsyncRead for Holder<T> {
     unsafe fn prepare_uninitialized_buffer(&self, buf: &mut [u8]) -> bool {
-        self.holder.upstream.prepare_uninitialized_buffer(buf)
+        self.upstream.prepare_uninitialized_buffer(buf)
     }
 
     fn read_buf<B: BufMut>(&mut self, buf: &mut B) -> Poll<usize, std::io::Error>
         where Self: Sized,
     {
-        self.holder.upstream.read_buf(buf)
+        //TODO: unable to wait for completion? unable to call write_block ?
+        self.upstream.read_buf(buf)
     }
 
     //TODO fn framed<T: Encoder + Decoder>(self, codec: T) -> Framed<Self, T> {
@@ -185,68 +181,14 @@ impl<T: AsyncRead> AsyncRead for Holder<Passthru<T>> {
     //TODO }
 }
 
-impl<T: AsyncWrite> AsyncWrite for Holder<Passthru<T>> {
+impl<'t,T: AsyncWrite> AsyncWrite for Holder<T> {
     fn shutdown(&mut self) -> Poll<(), std::io::Error> {
-        self.holder.upstream.shutdown()
-    }
-
-    fn write_buf<B: Buf>(&mut self, buf: &mut B) -> Poll<usize, std::io::Error> {
-        self.holder.upstream.write_buf(buf)
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-impl<T: Read> Read for Holder<Logger<T>> {
-    fn read(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
-        let n = try!(self.holder.upstream.read(dst));
-        try!(self.holder.write_block(Direction::Out, &dst[0..n]));
-        Ok(n)
-    }
-}
-
-impl<T: Write> Write for Holder<Logger<T>> {
-    fn write(&mut self, src: &[u8]) -> std::io::Result<usize> {
-        let n = try!(self.holder.upstream.write(src));
-        try!(self.holder.write_block(Direction::In, &src[0..n]));
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        try!(self.holder.upstream.flush());
-        Ok(())
-    }
-}
-
-impl<T: AsyncRead> AsyncRead for Holder<Logger<T>> {
-    unsafe fn prepare_uninitialized_buffer(&self, buf: &mut [u8]) -> bool {
-        self.holder.upstream.prepare_uninitialized_buffer(buf)
-    }
-
-    fn read_buf<B: BufMut>(&mut self, buf: &mut B) -> Poll<usize, std::io::Error>
-        where Self: Sized,
-    {
-        //TODO: unable to wait for completion? unable to call write_block ?
-        self.holder.upstream.read_buf(buf)
-    }
-
-    //TODO fn framed<T: Encoder + Decoder>(self, codec: T) -> Framed<Self, T> {
-    //TODO     self.holder.upstream.framed(codec)
-    //TODO }
-
-    //TODO fn split(self) -> (ReadHalf<Self>, WriteHalf<Self>) {
-    //TODO     self.holder.upstream.split()
-    //TODO }
-}
-
-impl<T: AsyncWrite> AsyncWrite for Holder<Logger<T>> {
-    fn shutdown(&mut self) -> Poll<(), std::io::Error> {
-        self.holder.upstream.shutdown()
+        self.upstream.shutdown()
     }
 
     fn write_buf<B: Buf>(&mut self, buf: &mut B) -> Poll<usize, std::io::Error> {
         //TODO: unable to wait for completion? unable to call write_block ?
-        self.holder.upstream.write_buf(buf)
+        self.upstream.write_buf(buf)
     }
 }
 
